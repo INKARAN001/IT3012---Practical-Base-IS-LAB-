@@ -3,6 +3,8 @@ from collections import deque
 import heapq
 import math
 
+from logic_engine import KnowledgeBase
+
 
 class SimpleReflexAgent:
     """
@@ -69,12 +71,18 @@ class SearchAgent:
     Goal-based / planning agent.
     Practical 03: BFS, DFS, UCS (uninformed search)
     Practical 04: A* (informed search, with Manhattan / Euclidean heuristics)
+    Practical 07: Knowledge Base + Forward Chaining feasibility check in A*
     """
 
     def __init__(self):
         self.plan = []
         self.active_algo = 'BFS'   # 'BFS', 'DFS', 'UCS', or 'AStar'
         self.last_nodes_expanded = 0   # set by each *_search call for instrumentation
+
+        # Practical 07 — Step 3.1: game safety constraints as Horn clauses
+        self.kb = KnowledgeBase()
+        self.kb.tell_rule(['TargetVisible', 'HasDust'], 'SafeToEngage')        # Rule 1
+        self.kb.tell_rule(['SafeToEngage', 'BloodseekerMissing'], 'Retreat')   # Rule 2
 
     # ------------------------------------------------------------------
     # Shared helper: valid orthogonal neighbours of a cell
@@ -183,7 +191,9 @@ class SearchAgent:
     # Practical 04 — A*: priority queue ordered by f(n) = g(n) + h(n)
     # ------------------------------------------------------------------
     def astar_search(self, start_pos, goal_pos, walls, grid_size,
-                      heuristic_type='manhattan'):
+                      heuristic_type='manhattan', tile_facts=None):
+        if tile_facts is None:
+            tile_facts = {}
         heuristic_fn = (self.manhattan_distance if heuristic_type == 'manhattan'
                          else self.euclidean_distance)
 
@@ -206,8 +216,17 @@ class SearchAgent:
             reached_states.add(current_pos)
             nodes_expanded += 1
 
+            # Reachability: _neighbors() already filters out walls / off-grid cells
             for action, neighbor in self._neighbors(current_pos, walls, grid_size):
                 if neighbor not in reached_states:
+                    # Practical 07 — Step 3.2: Feasibility check via the KB
+                    self.kb.clear_facts()
+                    for fact in tile_facts.get(neighbor, []):
+                        self.kb.tell_fact(fact)
+                    self.kb.forward_chain()
+                    if 'Retreat' in self.kb.facts:
+                        continue   # infeasible: logically unsafe even though reachable
+
                     g_new = g_cost + 1
                     h_new = heuristic_fn(neighbor, goal_pos)
                     f_new = g_new + h_new
@@ -242,8 +261,18 @@ class SearchAgent:
             elif self.active_algo == 'UCS':
                 self.plan = self.ucs_search(current_pos, goal_pos, walls, grid_size)
             elif self.active_algo == 'AStar':
-                self.plan = self.astar_search(current_pos, goal_pos, walls, grid_size,
-                                               heuristic_type='manhattan')
+                # Practical 07 — Step 3.3: sample per-tile facts for the KB
+                tile_facts = {
+                    (1, 0): ['TargetVisible', 'HasDust', 'BloodseekerMissing'],  # deduces Retreat: blocked
+                    (0, 1): ['TargetVisible', 'HasDust'],                        # SafeToEngage only: allowed
+                }
+                # Try food nearest-first, so an infeasible goal tile doesn't leave
+                # the agent with an empty plan for the rest of the game.
+                for goal_pos in sorted(all_food, key=lambda f: abs(f[0] - current_pos[0]) + abs(f[1] - current_pos[1])):
+                    self.plan = self.astar_search(current_pos, goal_pos, walls, grid_size,
+                                                   heuristic_type='manhattan', tile_facts=tile_facts)
+                    if self.plan:
+                        break
 
         if not self.plan:
             return None
